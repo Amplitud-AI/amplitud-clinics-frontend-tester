@@ -42,7 +42,7 @@ export function humanizeEntityTypeSlug(entityType: string): string {
   const raw = (entityType || "").trim();
   if (!raw) return "Unknown source";
 
-  let staged = raw.replace(/^tmp_/i, "").replace(/^temp_/i, "");
+  const staged = raw.replace(/^tmp_/i, "").replace(/^temp_/i, "");
   let clean = staged.replace(/_/g, " ").replace(/-/g, " ").trim();
   const lower = clean.toLowerCase();
   if (lower === "unknown entity" || lower === "unknown") return "Unknown";

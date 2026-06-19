@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { AnnotationFrame } from "@/components/FlowAnnotation";
 import { waApiBase } from "@/lib/whatsapp-service-client";
 
 const LS_KEY = "clinic_flow_wa_sessions_api_key";
@@ -57,23 +58,25 @@ function extractQrFromSessionStatus(json: unknown): string | null {
 }
 
 export type WhatsAppMcpSessionsPanelProps = {
-  staffBearer: string | null;
-  ttlSeconds: string;
+  mintTtl: string;
+  showAnnotations?: boolean;
+  onMintTtlChange: (value: string) => void;
+  onMintWa: () => void;
   onLog: (title: string, body: string) => void;
   /** Fired when POST /api/whatsapp/sessions returns ``wa_browser_session_id`` (transport PATCH / Phase D). */
   onSessionBound?: (waBrowserSessionId: string) => void;
 };
 
 export default function WhatsAppMcpSessionsPanel({
-  staffBearer,
-  ttlSeconds,
+  mintTtl,
+  showAnnotations = false,
+  onMintTtlChange,
+  onMintWa,
   onLog,
   onSessionBound,
 }: WhatsAppMcpSessionsPanelProps) {
-  const base = waApiBase();
   const [sessionsApiKey, setSessionsApiKey] = useState("");
   const [opaqueToken, setOpaqueToken] = useState("");
-  const [onboardingUrl, setOnboardingUrl] = useState("");
   const [registryId, setRegistryId] = useState("");
   const [pollQr, setPollQr] = useState<string | null>(null);
   const [pollJson, setPollJson] = useState("");
@@ -98,38 +101,10 @@ export default function WhatsAppMcpSessionsPanel({
     }
   }, [sessionsApiKey, onLog]);
 
-  const mintLink = useCallback(async () => {
-    if (!staffBearer?.trim()) {
-      onLog(
-        "mint-link",
-        "Sign in (Phase 0) first — need staff JWT for X-Clinic-Supabase-Authorization.",
-      );
-      return;
-    }
-    const ttl = Math.min(86400, Math.max(60, Number(ttlSeconds) || 900));
-    onLog("POST /api/whatsapp/onboarding/mint-link", `ttl=${ttl} → ${base}`);
-    const r = await waSessionRequest("/api/whatsapp/onboarding/mint-link", {
-      sessionsKey: sessionsApiKey,
-      staffBearer,
-      method: "POST",
-      body: JSON.stringify({ ttl_seconds: ttl }),
-    });
-    onLog(`mint-link (${r.status})`, pretty(r.json));
-    if (r.ok && r.json && typeof r.json === "object") {
-      const d = (r.json as Record<string, unknown>).data;
-      if (d && typeof d === "object") {
-        const tok = (d as Record<string, unknown>).opaque_token;
-        const url = (d as Record<string, unknown>).onboarding_url;
-        if (typeof tok === "string") setOpaqueToken(tok);
-        if (typeof url === "string") setOnboardingUrl(url);
-      }
-    }
-  }, [base, onLog, sessionsApiKey, staffBearer, ttlSeconds]);
-
   const createRegistrySession = useCallback(async () => {
     const tok = opaqueToken.trim();
     if (!tok) {
-      onLog("POST /api/whatsapp/sessions", "Set opaque_token (mint-link or paste).");
+      onLog("POST /api/whatsapp/sessions", "Set opaque_token from POST clinic/whatsapp/mint-onboarding-token.");
       return;
     }
     onLog("POST /api/whatsapp/sessions", `onboarding_token len=${tok.length}`);
@@ -227,67 +202,113 @@ export default function WhatsAppMcpSessionsPanel({
         QR — same wiring as CA-1 + multi-session onboarding.
       </p>
 
-      <div className="space-y-1">
-        <span className="text-xs font-medium block">Sessions API key (Bearer)</span>
-        <input
-          type="password"
-          autoComplete="off"
-          className="border px-2 py-1 w-full font-mono text-xs"
-          placeholder="WHATSAPP_SESSIONS_API_KEY or empty if dev allows unauthenticated"
-          value={sessionsApiKey}
-          onChange={(e) => setSessionsApiKey(e.target.value)}
-        />
-        <button type="button" className="border px-2 py-1 text-xs rounded" onClick={saveKeyLocal}>
-          Save key locally
-        </button>
-      </div>
+      <AnnotationFrame
+        enabled={showAnnotations}
+        kind="clinic"
+        title="What clinic sees"
+        note="The real frontend should reduce this whole chain to one Connect WhatsApp button, then a loading state, then the QR code to scan."
+      >
+        <div className="rounded border border-lime-300 bg-lime-50/40 p-3 text-xs dark:border-lime-700 dark:bg-lime-950/20">
+          <p className="font-medium">Clinic-facing UX target</p>
+          <p className="mt-1 text-zinc-600 dark:text-zinc-300">
+            Click <strong>Connect WhatsApp</strong> → backend mints token, creates session, polls status → show QR.
+          </p>
+        </div>
+      </AnnotationFrame>
 
-      <div className="flex flex-wrap gap-2 items-center">
-        <button
-          type="button"
-          className="border px-3 py-1 rounded disabled:opacity-50"
-          disabled={!staffBearer?.trim()}
-          onClick={() => void mintLink()}
-        >
-          POST mint-link (staff JWT → CA-1)
-        </button>
-        <button type="button" className="border px-3 py-1 rounded" onClick={() => void listSessions()}>
-          List sessions
-        </button>
-      </div>
+      <AnnotationFrame
+        enabled={showAnnotations}
+        kind="automated"
+        title="Server secret for WhatsApp service"
+        note="WHATSAPP_SESSIONS_API_KEY proves your backend may create/list/delete WhatsApp browser sessions. It must stay server-side; this local input is only for the tester."
+      >
+        <div className="space-y-1">
+          <span className="text-xs font-medium block">Sessions API key (Bearer)</span>
+          <input
+            type="password"
+            autoComplete="off"
+            className="border px-2 py-1 w-full font-mono text-xs"
+            placeholder="WHATSAPP_SESSIONS_API_KEY or empty if dev allows unauthenticated"
+            value={sessionsApiKey}
+            onChange={(e) => setSessionsApiKey(e.target.value)}
+          />
+          <button type="button" className="border px-2 py-1 text-xs rounded" onClick={saveKeyLocal}>
+            Save key locally
+          </button>
+        </div>
+      </AnnotationFrame>
 
-      {onboardingUrl && (
-        <p className="text-xs break-all">
-          <span className="text-zinc-500">Onboarding URL: </span>
-          <a href={onboardingUrl} className="text-blue-600 underline" target="_blank" rel="noreferrer">
-            open
-          </a>
-        </p>
-      )}
+      <AnnotationFrame
+        enabled={showAnnotations}
+        kind="dev"
+        title="Optional session inspection"
+        note="Session listing is operator/debug only. The actual mint step is Agnentic POST clinic/whatsapp/mint-onboarding-token with ttl_seconds."
+      >
+        <div className="flex flex-wrap gap-2 items-center">
+          <button type="button" className="border px-3 py-1 rounded" onClick={() => void listSessions()}>
+            List sessions
+          </button>
+        </div>
+      </AnnotationFrame>
 
-      <div className="space-y-1">
-        <span className="text-xs font-medium block">opaque_token</span>
-        <textarea
-          className="border w-full font-mono text-xs p-2 min-h-[56px]"
-          value={opaqueToken}
-          onChange={(e) => setOpaqueToken(e.target.value)}
-        />
-      </div>
+      <AnnotationFrame
+        enabled={showAnnotations}
+        kind="automated"
+        title="Step 1: Agnentic mint token"
+        note="This belongs before opaque_token. The backend verifies the clinic admin JWT and mints the short-lived opaque token with ttl_seconds."
+      >
+        <div className="flex flex-wrap gap-2 items-center">
+          <label className="flex items-center gap-1">
+            ttl_seconds
+            <input
+              className="border px-2 py-1 w-24"
+              value={mintTtl}
+              onChange={(e) => onMintTtlChange(e.target.value)}
+            />
+          </label>
+          <button type="button" className="border px-3 py-1 rounded" onClick={onMintWa}>
+            POST clinic/whatsapp/mint-onboarding-token
+          </button>
+        </div>
+      </AnnotationFrame>
 
-      <div className="flex flex-wrap gap-2">
-        <button type="button" className="border px-3 py-1 rounded" onClick={() => void createRegistrySession()}>
-          POST sessions (create registry row)
-        </button>
-        <input
-          className="border px-2 py-1 flex-1 min-w-[160px] font-mono text-xs"
-          placeholder="registry session_id"
-          value={registryId}
-          onChange={(e) => setRegistryId(e.target.value)}
-        />
-        <button type="button" className="border px-3 py-1 rounded" onClick={() => void pollOneStatus()}>
-          Poll status now
-        </button>
-      </div>
+      <AnnotationFrame
+        enabled={showAnnotations}
+        kind="automated"
+        title="Opaque token"
+        note="Paste the opaque_token returned by Agnentic POST clinic/whatsapp/mint-onboarding-token in this tester. In production, the server passes it directly into POST sessions."
+      >
+        <div className="space-y-1">
+          <span className="text-xs font-medium block">opaque_token</span>
+          <textarea
+            className="border w-full font-mono text-xs p-2 min-h-[56px]"
+            value={opaqueToken}
+            onChange={(e) => setOpaqueToken(e.target.value)}
+          />
+        </div>
+      </AnnotationFrame>
+
+      <AnnotationFrame
+        enabled={showAnnotations}
+        kind="automated"
+        title="Create session and poll QR"
+        note="The backend should call POST sessions, keep the registry session_id, and poll status until qrCode appears."
+      >
+        <div className="flex flex-wrap gap-2">
+          <button type="button" className="border px-3 py-1 rounded" onClick={() => void createRegistrySession()}>
+            POST sessions (create registry row)
+          </button>
+          <input
+            className="border px-2 py-1 flex-1 min-w-[160px] font-mono text-xs"
+            placeholder="registry session_id"
+            value={registryId}
+            onChange={(e) => setRegistryId(e.target.value)}
+          />
+          <button type="button" className="border px-3 py-1 rounded" onClick={() => void pollOneStatus()}>
+            Poll status now
+          </button>
+        </div>
+      </AnnotationFrame>
 
       {pollQr && (
         <div className="text-center space-y-2">
@@ -298,20 +319,34 @@ export default function WhatsAppMcpSessionsPanel({
       )}
 
       {pollJson && (
-        <details className="text-xs">
-          <summary className="cursor-pointer text-zinc-600">Last status JSON</summary>
-          <pre className="mt-1 p-2 bg-zinc-100 dark:bg-zinc-900 overflow-auto max-h-40">{pollJson}</pre>
-        </details>
+        <AnnotationFrame
+          enabled={showAnnotations}
+          kind="dev"
+          title="Status JSON"
+          note="The real frontend should render status/QR, not raw WhatsApp service JSON."
+        >
+          <details className="text-xs">
+            <summary className="cursor-pointer text-zinc-600">Last status JSON</summary>
+            <pre className="mt-1 p-2 bg-zinc-100 dark:bg-zinc-900 overflow-auto max-h-40">{pollJson}</pre>
+          </details>
+        </AnnotationFrame>
       )}
 
-      <div className="flex flex-wrap gap-2 pt-2 border-t border-zinc-200">
-        <button type="button" className="border px-3 py-1 rounded text-xs" onClick={() => void deleteSession()}>
-          DELETE this session
-        </button>
-        <button type="button" className="border px-3 py-1 rounded text-xs" onClick={() => void logoutAll()}>
-          POST logout-all
-        </button>
-      </div>
+      <AnnotationFrame
+        enabled={showAnnotations}
+        kind="automated"
+        title="Session teardown"
+        note="Disconnect/change-number actions are real, but production should call these from a controlled backend flow with server secrets."
+      >
+        <div className="flex flex-wrap gap-2 pt-2 border-t border-zinc-200">
+          <button type="button" className="border px-3 py-1 rounded text-xs" onClick={() => void deleteSession()}>
+            DELETE this session
+          </button>
+          <button type="button" className="border px-3 py-1 rounded text-xs" onClick={() => void logoutAll()}>
+            POST logout-all
+          </button>
+        </div>
+      </AnnotationFrame>
     </section>
   );
 }

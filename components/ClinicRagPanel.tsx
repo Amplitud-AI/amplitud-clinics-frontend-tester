@@ -307,10 +307,7 @@ export default function ClinicRagPanel({
       );
       return false;
     }
-    const input = document.getElementById(
-      "clinic-knowledge-onboarding-file",
-    ) as HTMLInputElement | null;
-    const file = input?.files?.[0];
+    const file = clinicFileInputRef.current?.files?.[0];
     if (!file) {
       onLog("Clinic knowledge — enqueue", "Choose a file first.");
       return false;

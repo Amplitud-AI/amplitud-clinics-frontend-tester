@@ -31,9 +31,26 @@ type StaffRow = {
 
 function patientLabel(p: PatientRow): string {
   const d = (p.display_name ?? "").trim();
-  if (d) return `${d} (${p.pt_id})`;
-  const n = `${(p.first_name ?? "").trim()} ${(p.last_name ?? "").trim()}`.trim();
-  return n || p.pt_id;
+  const base = d
+    ? `${d} (${p.pt_id})`
+    : `${(p.first_name ?? "").trim()} ${(p.last_name ?? "").trim()}`.trim() || p.pt_id;
+  const pref = (p.preferred_provider_display_name ?? "").trim();
+  return pref ? `${base} — preferred: ${pref}` : base;
+}
+
+function preferredSummary(p: PatientRow | undefined): string {
+  const pref = (p?.preferred_provider_display_name ?? "").trim();
+  return pref || "(not set)";
+}
+
+function matchStaffForPreferred(staffRows: StaffRow[], preferred: string): StaffRow | null {
+  const needle = preferred.trim().toLowerCase();
+  if (!needle) return null;
+  return (
+    staffRows.find((s) => staffPreferredLabel(s).trim().toLowerCase() === needle)
+    ?? staffRows.find((s) => (s.display_name ?? "").trim().toLowerCase() === needle)
+    ?? null
+  );
 }
 
 function staffLabel(s: StaffRow): string {
@@ -189,8 +206,22 @@ export default function PatientPreferredDoctorPanel({
         ? staffResp.json.map(parseStaffRow).filter((r): r is StaffRow => r != null)
         : [];
       setStaff(staffRows);
+      if (patientRows.length === 1) {
+        setSelectedPtId(patientRows[0].pt_id);
+        const matched = matchStaffForPreferred(
+          staffRows,
+          patientRows[0].preferred_provider_display_name ?? "",
+        );
+        if (matched) setSelectedStId(matched.st_id);
+      }
       setResult(`loaded ${patientRows.length} patients, ${staffRows.length} staff`);
-      onLog("patient preferred doctor lists", `${patientRows.length} patients, ${staffRows.length} staff`);
+      onLog(
+        "patient preferred doctor lists",
+        `${patientRows.length} patients, ${staffRows.length} staff\n`
+          + patientRows
+            .map((p) => `${patientLabel(p)} → preferred: ${preferredSummary(p)}`)
+            .join("\n"),
+      );
     } finally {
       setBusy(false);
     }
@@ -202,6 +233,15 @@ export default function PatientPreferredDoctorPanel({
     }, 0);
     return () => window.clearTimeout(timer);
   }, [refresh]);
+
+  useEffect(() => {
+    if (!selectedPatient) return;
+    const matched = matchStaffForPreferred(
+      staff,
+      selectedPatient.preferred_provider_display_name ?? "",
+    );
+    if (matched) setSelectedStId(matched.st_id);
+  }, [selectedPatient, staff]);
 
   const setPreferred = useCallback(async () => {
     if (!hasSelections || !selectedPtId || !selectedStId || !selectedStaff) return;
@@ -229,15 +269,20 @@ export default function PatientPreferredDoctorPanel({
       setResult(`save failed (${r.status})`);
       return;
     }
-    const updated = Array.isArray(r.json)
-      ? (r.json[0] as Record<string, unknown>)
-      : (r.json as Record<string, unknown>);
-    const nextRow = parsePatientRow(updated);
+    const rows = Array.isArray(r.json) ? r.json : r.json != null ? [r.json] : [];
+    if (rows.length === 0) {
+      setResult(
+        "denied (0 rows updated — likely missing can_manage_scheduling_preferences; check log)",
+      );
+      await refresh();
+      return;
+    }
+    const nextRow = parsePatientRow(rows[0]);
     if (nextRow) {
       setPatients((curr) => curr.map((p) => (p.pt_id === nextRow.pt_id ? nextRow : p)));
       setResult(`saved ${patientLabel(nextRow)} → ${nextRow.preferred_provider_display_name || value}`);
     } else {
-      setResult("saved");
+      setResult("saved (refresh to confirm)");
       await refresh();
     }
   }, [cid, canClinicWrite, hasSelections, onLog, refresh, selectedPtId, selectedStaff, selectedStId, anon, token]);
@@ -259,6 +304,14 @@ export default function PatientPreferredDoctorPanel({
     onLog(`PATCH clear preferred doctor (${r.status})`, pretty(r.json));
     if (!r.ok) {
       setResult(`clear failed (${r.status})`);
+      return;
+    }
+    const rows = Array.isArray(r.json) ? r.json : r.json != null ? [r.json] : [];
+    if (rows.length === 0) {
+      setResult(
+        "clear denied (0 rows updated — likely missing can_manage_scheduling_preferences)",
+      );
+      await refresh();
       return;
     }
     setResult("cleared");
@@ -312,10 +365,24 @@ export default function PatientPreferredDoctorPanel({
 
       <div className="text-xs">
         <div>
-          Current preferred:{" "}
-          <strong>{selectedPatient?.preferred_provider_display_name?.trim() || "(not set)"}</strong>
+          Current preferred (selected patient):{" "}
+          <strong>{preferredSummary(selectedPatient)}</strong>
         </div>
+        {!selectedPtId ? (
+          <div className="text-zinc-500 mt-1">Select a patient to inspect or change assignment.</div>
+        ) : null}
       </div>
+
+      {activePatients.length > 0 ? (
+        <div className="text-xs border border-zinc-200 rounded p-2 space-y-1">
+          <div className="font-medium text-zinc-700">Loaded patients (read from GET)</div>
+          {activePatients.map((p) => (
+            <div key={p.pt_id}>
+              {patientLabel(p)}
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       <div className="flex flex-wrap gap-2">
         <button

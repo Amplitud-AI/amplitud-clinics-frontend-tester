@@ -214,6 +214,8 @@ export default function PatientRagPanel({
 
   const [showWipeModal, setShowWipeModal] = useState(false);
   const [wipeConfirmText, setWipeConfirmText] = useState("");
+  /** Shown in the staging box when enqueue fails or prerequisites are missing (Log panel also gets details). */
+  const [enqueueFeedback, setEnqueueFeedback] = useState<string | null>(null);
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -269,7 +271,21 @@ export default function PatientRagPanel({
     setBaselinePayloadEditor(pText);
     setQueueTargetPtId(q);
     setBaselineQueueTargetPtId(q);
+    setEnqueueFeedback(null);
   }, []);
+
+  const fetchLatestPendingStaging = useCallback(async (): Promise<boolean> => {
+    const r = await clinicPostgrest(
+      "GET",
+      `rest/v1/knowledge_change_requests?cl_id=eq.${encodeURIComponent(cid)}&request_status=eq.pending&order=created_at.desc&limit=1`,
+      { bearer: token, anon },
+    );
+    if (!r.ok) return false;
+    const row = firstInsertedRow(r.json);
+    if (!row) return false;
+    loadStagingFromRow(row);
+    return true;
+  }, [anon, cid, loadStagingFromRow, token]);
 
   const clearStaging = useCallback(() => {
     setStagingId(null);
@@ -279,6 +295,7 @@ export default function PatientRagPanel({
     setBaselineTitle("");
     setBaselinePayloadEditor("");
     setBaselineQueueTargetPtId("");
+    setEnqueueFeedback(null);
   }, []);
 
   const stagingDirty =
@@ -400,21 +417,20 @@ export default function PatientRagPanel({
   /** Real clinic onboarding path: INSERT knowledge_change_requests (admin JWT + RLS). */
   const enqueueFileRequest = useCallback(async () => {
     if (!canClinicQueue) {
-      onLog(
-        "Clinic knowledge — enqueue",
-        "Need Phase 0 Bearer + anon key + Phase B cl_id. Inserts require **clinic_admin** JWT (RLS `knowledge_change_requests_admin_insert`).",
-      );
+      const msg =
+        "Need Phase 0 Bearer + anon key + Phase B cl_id. Inserts require **clinic_admin** JWT (RLS `knowledge_change_requests_admin_insert`).";
+      setEnqueueFeedback(msg);
+      onLog("Clinic knowledge — enqueue", msg);
       return false;
     }
-    const input = document.getElementById(
-      "clinic-knowledge-onboarding-file",
-    ) as HTMLInputElement | null;
-    const file = input?.files?.[0];
+    const file = clinicFileInputRef.current?.files?.[0];
     if (!file) {
+      setEnqueueFeedback("Choose a file first.");
       onLog("Patient knowledge — enqueue", "Choose a file first.");
       return false;
     }
     if (!queueTargetPtId.trim()) {
+      setEnqueueFeedback("Select a patient in Mandatory Patient scope before enqueue.");
       onLog("Patient knowledge — enqueue", "You must select a patient scope first.");
       return false;
     }
@@ -450,36 +466,69 @@ export default function PatientRagPanel({
       target_pt_id: queueTargetPtId.trim(),
       payload: { text, source_filename: file.name },
     };
-    const r = await clinicPostgrest("POST", "rest/v1/knowledge_change_requests", {
-      bearer: token,
-      anon,
-      body: JSON.stringify(row),
-      prefer: "return=representation",
-    });
-    if (r.ok) {
-      const ins = firstInsertedRow(r.json);
-      if (ins) loadStagingFromRow(ins);
-      onLog(
-        `Clinic POST knowledge_change_requests (${r.status})`,
-        `Pending row created — **review payload below**, **Save draft** if you edited, then **Confirm ingest (F3→F4)** when INTERNAL_SERVICE_KEY is set.\n${pretty(r.json)}`,
-      );
-    } else {
-      onLog(`Clinic POST knowledge_change_requests (${r.status})`, pretty(r.json));
+    setBusy(true);
+    setEnqueueFeedback(null);
+    try {
+      const r = await clinicPostgrest("POST", "rest/v1/knowledge_change_requests", {
+        bearer: token,
+        anon,
+        body: JSON.stringify(row),
+        prefer: "return=representation",
+      });
+      if (r.ok) {
+        const ins = firstInsertedRow(r.json);
+        if (ins) loadStagingFromRow(ins);
+        else if (!(await fetchLatestPendingStaging())) {
+          setEnqueueFeedback(
+            `POST ${r.status} but no row in response — check Log. If SQL also shows no row, insert was blocked (often 403 clinic_admin).`,
+          );
+        }
+        onLog(
+          `Clinic POST knowledge_change_requests (${r.status})`,
+          `Pending row created — **review payload below**, **Save draft** if you edited, then **Confirm ingest (F3→F4)** when INTERNAL_SERVICE_KEY is set.\n${pretty(r.json)}`,
+        );
+      } else {
+        const hint =
+          r.status === 401 || r.status === 403
+            ? " — JWT must be **clinic_admin** for this clinic (Phase 0 admin, then Refresh JWT)."
+            : "";
+        setEnqueueFeedback(`Enqueue failed (HTTP ${r.status})${hint}. Details in Log below.`);
+        onLog(`Clinic POST knowledge_change_requests (${r.status})`, pretty(r.json));
+      }
+      return r.ok;
+    } catch (e) {
+      setEnqueueFeedback(`Enqueue error: ${String(e)}`);
+      onLog("Clinic knowledge — enqueue", String(e));
+      return false;
+    } finally {
+      setBusy(false);
     }
-    return r.ok;
-  }, [anon, canClinicQueue, cid, loadStagingFromRow, onLog, queueTargetPtId, token]);
+  }, [
+    anon,
+    canClinicQueue,
+    cid,
+    fetchLatestPendingStaging,
+    loadStagingFromRow,
+    onLog,
+    queueTargetPtId,
+    token,
+  ]);
 
   const enqueueUrlRequest = useCallback(async () => {
     if (!canClinicQueue) {
-      onLog("Clinic knowledge — URL enqueue", "Need Bearer + anon + cl_id.");
+      const msg = "Need Phase 0 Bearer + anon + Phase B cl_id (see top of page).";
+      setEnqueueFeedback(msg);
+      onLog("Clinic knowledge — URL enqueue", msg);
       return false;
     }
     const u = ingestUrl.trim();
     if (!u.startsWith("http://") && !u.startsWith("https://")) {
+      setEnqueueFeedback("source_uri must start with http:// or https://");
       onLog("Patient knowledge — URL enqueue", "source_uri must be http(s).");
       return false;
     }
     if (!queueTargetPtId.trim()) {
+      setEnqueueFeedback("Select a patient in Mandatory Patient scope before enqueue.");
       onLog("Patient knowledge — URL enqueue", "You must select a patient scope first.");
       return false;
     }
@@ -492,24 +541,55 @@ export default function PatientRagPanel({
       source_uri: u,
       payload: {},
     };
-    const r = await clinicPostgrest("POST", "rest/v1/knowledge_change_requests", {
-      bearer: token,
-      anon,
-      body: JSON.stringify(row),
-      prefer: "return=representation",
-    });
-    if (r.ok) {
-      const ins = firstInsertedRow(r.json);
-      if (ins) loadStagingFromRow(ins);
-      onLog(
-        `Clinic POST knowledge_change_requests URL (${r.status})`,
-        `Pending URL row — edit **payload** (e.g. add \`"text"\` to override download) if needed, **Save draft**, then **Confirm ingest**.\n${pretty(r.json)}`,
-      );
-    } else {
-      onLog(`Clinic POST knowledge_change_requests URL (${r.status})`, pretty(r.json));
+    setBusy(true);
+    setEnqueueFeedback(null);
+    try {
+      const r = await clinicPostgrest("POST", "rest/v1/knowledge_change_requests", {
+        bearer: token,
+        anon,
+        body: JSON.stringify(row),
+        prefer: "return=representation",
+      });
+      if (r.ok) {
+        const ins = firstInsertedRow(r.json);
+        if (ins) loadStagingFromRow(ins);
+        else if (!(await fetchLatestPendingStaging())) {
+          setEnqueueFeedback(
+            `POST ${r.status} but staging did not load — see Log. Run SQL on clinic.knowledge_change_requests for cl_id=${cid}.`,
+          );
+        }
+        onLog(
+          `Clinic POST knowledge_change_requests URL (${r.status})`,
+          `Pending URL row — edit **payload** (e.g. add \`"text"\` to override download) if needed, **Save draft**, then **Confirm ingest**.\n${pretty(r.json)}`,
+        );
+      } else {
+        const hint =
+          r.status === 401 || r.status === 403
+            ? " — need **clinic_admin** JWT (not staff-only)."
+            : "";
+        setEnqueueFeedback(`URL enqueue failed (HTTP ${r.status})${hint}. See Log at page bottom.`);
+        onLog(`Clinic POST knowledge_change_requests URL (${r.status})`, pretty(r.json));
+      }
+      return r.ok;
+    } catch (e) {
+      setEnqueueFeedback(`URL enqueue error: ${String(e)}`);
+      onLog("Clinic knowledge — URL enqueue", String(e));
+      return false;
+    } finally {
+      setBusy(false);
     }
-    return r.ok;
-  }, [anon, canClinicQueue, cid, ingestUrl, loadStagingFromRow, onLog, queueTargetPtId, token, urlTitle]);
+  }, [
+    anon,
+    canClinicQueue,
+    cid,
+    fetchLatestPendingStaging,
+    ingestUrl,
+    loadStagingFromRow,
+    onLog,
+    queueTargetPtId,
+    token,
+    urlTitle,
+  ]);
 
   const saveClinicDraft = useCallback(async () => {
     if (!canClinicQueue || !stagingId) {
@@ -950,7 +1030,7 @@ export default function PatientRagPanel({
         <div className="flex flex-wrap items-center gap-2">
           <input
             ref={clinicFileInputRef}
-            id="clinic-knowledge-onboarding-file"
+            id="patient-knowledge-onboarding-file"
             type="file"
             accept=".txt,.md,.csv,.json,.html,.htm,text/plain"
             className="sr-only"
@@ -1034,9 +1114,22 @@ export default function PatientRagPanel({
             ) : null}
           </div>
           {!stagingId ? (
-            <p className="text-[11px] text-zinc-600 dark:text-zinc-400">
-              After <strong>Enqueue file</strong> or <strong>Enqueue URL</strong>, the new row&apos;s payload and title load here for edits. Nothing is sent to the platform worker until you run <strong>Confirm ingest</strong>.
-            </p>
+            <div className="space-y-2">
+              <p className="text-[11px] text-zinc-600 dark:text-zinc-400">
+                After <strong>Enqueue file</strong> or <strong>Enqueue URL</strong>, the new row&apos;s payload and title load here for edits. Nothing is sent to the platform worker until you run <strong>Confirm ingest</strong>.
+              </p>
+              {!canClinicQueue ? (
+                <p className="text-[11px] text-red-800 dark:text-red-200 rounded border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/30 px-2 py-1.5">
+                  Enqueue is disabled until <strong>Phase 0</strong> (Bearer present) and <strong>Phase B</strong>{" "}
+                  <code className="text-[10px]">cl_id</code> are set at the top of this page.
+                </p>
+              ) : null}
+              {enqueueFeedback ? (
+                <p className="text-[11px] text-red-800 dark:text-red-200 rounded border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/30 px-2 py-1.5 whitespace-pre-wrap">
+                  {enqueueFeedback}
+                </p>
+              ) : null}
+            </div>
           ) : (
             <>
               {stagingEntitySlug != null ? (

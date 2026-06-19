@@ -403,10 +403,7 @@ export default function KnowledgeRagPanel({
       );
       return false;
     }
-    const input = document.getElementById(
-      "clinic-knowledge-onboarding-file",
-    ) as HTMLInputElement | null;
-    const file = input?.files?.[0];
+    const file = clinicFileInputRef.current?.files?.[0];
     if (!file) {
       onLog("Clinic knowledge — enqueue", "Choose a file first.");
       return false;
@@ -907,7 +904,7 @@ export default function KnowledgeRagPanel({
         <div className="flex flex-wrap items-center gap-2">
           <input
             ref={clinicFileInputRef}
-            id="clinic-knowledge-onboarding-file"
+            id="knowledge-rag-panel-onboarding-file"
             type="file"
             accept=".txt,.md,.csv,.json,.html,.htm,text/plain"
             className="sr-only"

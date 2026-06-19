@@ -4,11 +4,28 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { agnenticFetch, agPath } from "@/lib/agnentic";
 import {
+  CLINIC_CAPABILITIES,
+  CLINIC_STAFF_ROLES,
+  DEFAULT_INVITE_ROLE,
+  canAssignClinicRole,
+  capabilityChecksFromArray,
+  emptyInviteCapabilityChecks,
+  extractCapabilitiesFromJwtPayload,
+  extractClinicRoleFromJwtPayload,
+  formatCapabilitiesCompact,
+  isClinicOwnerRole,
+  normalizeStaffRole,
+  selectedInviteCapabilities,
+  sessionCanManageTeamRoster,
+  type ClinicCapability,
+} from "@/lib/clinicRbac";
+import {
   getClinicInviteRedirectUrl,
   getSupabaseAnonKey,
   getSupabaseInviteFunctionName,
   getSupabaseUrl,
 } from "@/lib/config";
+import { decodeJwtPayload } from "@/lib/jwt";
 
 function pretty(x: unknown): string {
   try {
@@ -29,6 +46,7 @@ type StaffRow = {
   display_name?: string | null;
   email?: string | null;
   role?: string | null;
+  capabilities?: string[] | null;
   status?: string | null;
   first_name?: string | null;
   last_name?: string | null;
@@ -121,7 +139,8 @@ export default function StaffRosterPanel({
   const [roster, setRoster] = useState<StaffRow[]>([]);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteName, setInviteName] = useState("");
-  const [inviteRole, setInviteRole] = useState("clinic_staff");
+  const [inviteRole, setInviteRole] = useState<string>(DEFAULT_INVITE_ROLE);
+  const [inviteCaps, setInviteCaps] = useState(emptyInviteCapabilityChecks);
   const [pickStId, setPickStId] = useState("");
   const [waE164, setWaE164] = useState("");
   const [verifiedNumbers, setVerifiedNumbers] = useState<string[]>([]);
@@ -134,6 +153,8 @@ export default function StaffRosterPanel({
   const [profPositionTitle, setProfPositionTitle] = useState("");
   const [profDob, setProfDob] = useState("");
   const [profSpecialties, setProfSpecialties] = useState("");
+  const [editCaps, setEditCaps] = useState(emptyInviteCapabilityChecks);
+  const [editRole, setEditRole] = useState<string>(DEFAULT_INVITE_ROLE);
 
   const activeStaff = useMemo(
     () =>
@@ -168,6 +189,34 @@ export default function StaffRosterPanel({
   /** Writes that embed ``cl_id`` in the JSON body (Lane B2) need a known tenant in UI. */
   const canPostgrestTenant = Boolean(token && anon && cid);
 
+  const jwtPayload = useMemo(
+    () => (token ? decodeJwtPayload(token) : null),
+    [token],
+  );
+  const sessionClinicRole = useMemo(
+    () => extractClinicRoleFromJwtPayload(jwtPayload),
+    [jwtPayload],
+  );
+  const sessionIsOwner = isClinicOwnerRole(sessionClinicRole);
+  const sessionJwtCapabilities = useMemo(
+    () => extractCapabilitiesFromJwtPayload(jwtPayload),
+    [jwtPayload],
+  );
+  const sessionCanManageTeam = useMemo(
+    () => sessionCanManageTeamRoster(sessionIsOwner, sessionJwtCapabilities),
+    [sessionIsOwner, sessionJwtCapabilities],
+  );
+
+  const inviteCapabilitiesPayload = useMemo(
+    () => (sessionIsOwner ? selectedInviteCapabilities(inviteCaps) : []),
+    [inviteCaps, sessionIsOwner],
+  );
+
+  const editCapabilitiesPayload = useMemo(
+    () => selectedInviteCapabilities(editCaps),
+    [editCaps],
+  );
+
   const a1List = useCallback(async () => {
     if (!canPostgrestSession) {
       onLog(
@@ -177,7 +226,7 @@ export default function StaffRosterPanel({
       return;
     }
     const q =
-      "select=st_id,display_name,email,role,status,first_name,last_name,position_title,date_of_birth,specialties," +
+      "select=st_id,display_name,email,role,capabilities,status,first_name,last_name,position_title,date_of_birth,specialties," +
       "staff_channel_links(channel,contact_value,verification_status)" +
       "&order=created_at.desc&limit=50" +
       (cid ? `&cl_id=eq.${encodeURIComponent(cid)}` : "");
@@ -209,6 +258,7 @@ export default function StaffRosterPanel({
       p_email: email,
       p_role: inviteRole.trim(),
       p_display_name: inviteName.trim() || null,
+      p_capabilities: inviteCapabilitiesPayload,
     });
     const r = await clinicRest("POST", "rest/v1/rpc/invite_staff", {
       bearer: token,
@@ -217,7 +267,17 @@ export default function StaffRosterPanel({
     });
     onLog(`Lane A2 POST rpc/invite_staff (${r.status})`, pretty(r.json));
     if (r.ok) await a1List();
-  }, [a1List, anon, canPostgrestSession, inviteEmail, inviteName, inviteRole, onLog, token]);
+  }, [
+    a1List,
+    anon,
+    canPostgrestSession,
+    inviteCapabilitiesPayload,
+    inviteEmail,
+    inviteName,
+    inviteRole,
+    onLog,
+    token,
+  ]);
 
   const a2bEdgeInvite = useCallback(async () => {
     if (!supabase) {
@@ -240,6 +300,7 @@ export default function StaffRosterPanel({
       p_email: email,
       p_role: inviteRole.trim(),
       p_display_name: inviteName.trim() ? inviteName.trim() : null,
+      p_capabilities: inviteCapabilitiesPayload,
     };
     if (redirect) body.redirect_to = redirect;
 
@@ -272,7 +333,18 @@ export default function StaffRosterPanel({
     }
     onLog("Lane A2b ok", pretty(parsed));
     await a1List();
-  }, [a1List, anon, inviteEmail, inviteName, inviteRedirectTo, inviteRole, onLog, supabase, token]);
+  }, [
+    a1List,
+    anon,
+    inviteCapabilitiesPayload,
+    inviteEmail,
+    inviteName,
+    inviteRedirectTo,
+    inviteRole,
+    onLog,
+    supabase,
+    token,
+  ]);
 
   const b3Snapshot = useCallback(async () => {
     if (!token) {
@@ -345,7 +417,125 @@ export default function StaffRosterPanel({
     setProfSpecialties(
       Array.isArray(specs) ? specs.map((x) => String(x).trim()).filter(Boolean).join(", ") : "",
     );
+    setEditCaps(capabilityChecksFromArray(row.capabilities));
+    setEditRole(normalizeStaffRole(row.role));
   }, [roster]);
+
+  const a3cPatchRole = useCallback(async () => {
+    if (!canPostgrestTenant) {
+      onLog("Lane A3c", "Need session + tenant cl_id in UI for PATCH filter (cl_id=eq…&st_id=eq…).");
+      return;
+    }
+    const st = profileStId.trim();
+    if (!st) {
+      onLog("Lane A3c", "Pick a staff row in A3 (or Lane B pick → Load same staff).");
+      return;
+    }
+    const nextRole = normalizeStaffRole(editRole);
+    if (!canAssignClinicRole(sessionIsOwner, sessionCanManageTeam, nextRole)) {
+      onLog(
+        "Lane A3c",
+        nextRole === "owner"
+          ? "Only owner may assign role owner."
+          : "Need owner JWT or can_manage_team to change role.",
+      );
+      return;
+    }
+    const row = roster.find((r) => (r.st_id ?? "").trim() === st);
+    const prevRole = normalizeStaffRole(row?.role);
+    if (prevRole === nextRole) {
+      onLog("Lane A3c", `Role unchanged (${nextRole}). Pick a different role or another staff member.`);
+      return;
+    }
+    if (isClinicOwnerRole(row?.role) && nextRole !== "owner") {
+      onLog(
+        "Lane A3c",
+        "Warning: demoting an owner — ensure the clinic still has at least one owner row.",
+      );
+    }
+    const path = `rest/v1/staff?cl_id=eq.${encodeURIComponent(cid)}&st_id=eq.${encodeURIComponent(st)}`;
+    const body = { role: nextRole };
+    const r = await clinicRest("PATCH", path, {
+      bearer: token,
+      anon,
+      body: JSON.stringify(body),
+      prefer: "return=representation",
+    });
+    onLog(`Lane A3c PATCH staff.role (${r.status}) ${prevRole} → ${nextRole}`, pretty(r.json));
+    if (r.ok) {
+      onLog(
+        "Lane A3c follow-up",
+        "Affected user should Refresh JWT so app_metadata.clinic_role / clinic_roles map updates.",
+      );
+      await a1List();
+    }
+  }, [
+    a1List,
+    anon,
+    canPostgrestTenant,
+    cid,
+    editRole,
+    onLog,
+    profileStId,
+    roster,
+    sessionCanManageTeam,
+    sessionIsOwner,
+    token,
+  ]);
+
+  const a3bPatchCapabilities = useCallback(async () => {
+    if (!canPostgrestTenant) {
+      onLog("Lane A3b", "Need session + tenant cl_id in UI for PATCH filter (cl_id=eq…&st_id=eq…).");
+      return;
+    }
+    if (!sessionIsOwner) {
+      onLog(
+        "Lane A3b",
+        `Owner JWT required (RLS staff_clinic_staff_update_admin / jwt_is_clinic_admin). Your clinic_role: ${sessionClinicRole ?? "?"}`,
+      );
+      return;
+    }
+    const st = profileStId.trim();
+    if (!st) {
+      onLog("Lane A3b", "Pick a staff row in A3 (or Lane B pick → Load same staff).");
+      return;
+    }
+    const row = roster.find((r) => (r.st_id ?? "").trim() === st);
+    if (row && isClinicOwnerRole(row.role)) {
+      onLog(
+        "Lane A3b",
+        "Target has role owner — hook already grants all five caps in JWT; PATCH is optional for owners.",
+      );
+    }
+    const path = `rest/v1/staff?cl_id=eq.${encodeURIComponent(cid)}&st_id=eq.${encodeURIComponent(st)}`;
+    const body = { capabilities: editCapabilitiesPayload };
+    const r = await clinicRest("PATCH", path, {
+      bearer: token,
+      anon,
+      body: JSON.stringify(body),
+      prefer: "return=representation",
+    });
+    onLog(`Lane A3b PATCH staff.capabilities (${r.status})`, pretty(r.json));
+    if (r.ok) {
+      onLog(
+        "Lane A3b follow-up",
+        "Invited user must Refresh JWT after accept/login for new caps in app_metadata.capabilities.",
+      );
+      await a1List();
+    }
+  }, [
+    a1List,
+    anon,
+    canPostgrestTenant,
+    cid,
+    editCapabilitiesPayload,
+    onLog,
+    profileStId,
+    roster,
+    sessionClinicRole,
+    sessionIsOwner,
+    token,
+  ]);
 
   const a3PatchProfile = useCallback(async () => {
     if (!canPostgrestTenant) {
@@ -399,7 +589,7 @@ export default function StaffRosterPanel({
 
   const c2SaveSilent = useCallback(async () => {
     if (!token) {
-      onLog("Lane C2", "Need clinic JWT (clinic admin for PATCH).");
+      onLog("Lane C2", "Need clinic JWT (owner or can_manage_agent_control for PATCH).");
       return;
     }
     const selected = verifiedNumbers.filter((n) => silentPick[n]);
@@ -462,6 +652,8 @@ export default function StaffRosterPanel({
               <thead>
                 <tr className="bg-zinc-100 dark:bg-zinc-800 text-left">
                   <th className="p-2 font-medium">status</th>
+                  <th className="p-2 font-medium">role</th>
+                  <th className="p-2 font-medium">capabilities</th>
                   <th className="p-2 font-medium">name / email</th>
                   <th className="p-2 font-medium">WhatsApp (staff_channel_links)</th>
                 </tr>
@@ -472,6 +664,15 @@ export default function StaffRosterPanel({
                   return (
                   <tr key={s.st_id ?? "?"} className="border-t border-zinc-200 dark:border-zinc-700">
                     <td className="p-2 align-top whitespace-nowrap">{s.status ?? "—"}</td>
+                    <td className="p-2 align-top whitespace-nowrap font-mono text-[11px]">
+                      {s.role ?? "—"}
+                    </td>
+                    <td
+                      className="p-2 align-top font-mono text-[10px] max-w-[200px] break-all"
+                      title={formatCapabilitiesCompact(s.capabilities)}
+                    >
+                      {formatCapabilitiesCompact(s.capabilities)}
+                    </td>
                     <td className="p-2 align-top">
                       <div>{(s.display_name || s.email || s.st_id || "").trim() || "—"}</div>
                       {s.email && (s.display_name ?? "").trim() ? (
@@ -506,8 +707,11 @@ export default function StaffRosterPanel({
             onChange={(e) => setInviteRole(e.target.value)}
             aria-label="invite role"
           >
-            <option value="clinic_staff">clinic_staff</option>
-            <option value="clinic_admin">clinic_admin</option>
+            {CLINIC_STAFF_ROLES.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
           </select>
           <button type="button" className="border px-3 py-1 rounded text-xs" onClick={() => void a2Invite()}>
             A2 Invite (POST rpc/invite_staff)
@@ -516,6 +720,53 @@ export default function StaffRosterPanel({
             A2b Invite + email (Edge Function)
           </button>
         </div>
+        <fieldset className="border border-zinc-200 dark:border-zinc-700 rounded p-2 space-y-1 max-w-2xl">
+          <legend className="text-xs px-1">Invite capabilities (optional)</legend>
+          {!sessionIsOwner && (
+            <p className="text-xs text-amber-700 dark:text-amber-400">
+              Only owner may grant capabilities at invite. Invites still work with{" "}
+              <code className="text-xs">p_capabilities: []</code>
+              {sessionClinicRole ? (
+                <>
+                  {" "}
+                  (your JWT <code className="text-xs">clinic_role</code>:{" "}
+                  <span className="font-mono">{sessionClinicRole}</span>)
+                </>
+              ) : (
+                <> — refresh JWT after SQL 27</>
+              )}
+              .
+            </p>
+          )}
+          <ul className="space-y-1 text-xs">
+            {CLINIC_CAPABILITIES.map((cap) => (
+              <li key={cap.value} className="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  disabled={!sessionIsOwner}
+                  checked={!!inviteCaps[cap.value as ClinicCapability]}
+                  onChange={(e) =>
+                    setInviteCaps((prev) => ({
+                      ...prev,
+                      [cap.value]: e.target.checked,
+                    }))
+                  }
+                  aria-label={cap.label}
+                />
+                <span>
+                  <span className="font-mono text-[10px] text-zinc-500">{cap.value}</span>
+                  <span className="block">{cap.label}</span>
+                </span>
+              </li>
+            ))}
+          </ul>
+          {inviteCapabilitiesPayload.length > 0 && (
+            <p className="text-xs text-zinc-500 font-mono">
+              p_capabilities: [{inviteCapabilitiesPayload.join(", ")}]
+            </p>
+          )}
+        </fieldset>
         <input
           className="border px-2 py-1 w-full max-w-xl font-mono text-xs"
           placeholder={`redirect_to (optional; env: NEXT_PUBLIC_CLINIC_INVITE_REDIRECT_URL)`}
@@ -535,8 +786,9 @@ export default function StaffRosterPanel({
           <h3 className="text-sm font-medium">Lane A3 — Staff profile (PATCH)</h3>
           <p className="text-xs text-zinc-500">
             Columns aligned with <code className="text-xs">11_staff_profile_and_staff_channel_links</code>. Pick any
-            roster row (including <code className="text-xs">pending_invite</code>). Requires <strong>clinic admin</strong>{" "}
-            JWT (<code className="text-xs">16_staff_rls_clinic_admin_writes</code>). Filter:{" "}
+            roster row (including <code className="text-xs">pending_invite</code>). Requires <strong>owner</strong>{" "}
+            JWT (<code className="text-xs">clinic_role: owner</code>; shim{" "}
+            <code className="text-xs">jwt_is_clinic_admin</code> = owner). Filter:{" "}
             <code className="text-xs">cl_id=eq…&amp;st_id=eq…</code>.
           </p>
           <select
@@ -610,6 +862,96 @@ export default function StaffRosterPanel({
           <button type="button" className="border px-3 py-1 rounded text-xs" onClick={() => void a3PatchProfile()}>
             A3 PATCH staff profile
           </button>
+
+          <div className="border-t border-zinc-200 dark:border-zinc-700 pt-2 mt-2 space-y-2">
+            <h4 className="text-xs font-medium">Lane A3b — Post-invite capabilities (PATCH)</h4>
+            <p className="text-xs text-zinc-500">
+              Genuine path: PostgREST <code className="text-xs">PATCH clinic.staff</code> as owner (RLS{" "}
+              <code className="text-xs">16_staff_rls_clinic_admin_writes</code> +{" "}
+              <code className="text-xs">staff_capabilities_check</code>). Matches production dashboard until Phase D
+              RPC. Pick staff above — checkboxes load from A1 row.
+            </p>
+            {!sessionIsOwner && (
+              <p className="text-xs text-amber-700 dark:text-amber-400">
+                Owner JWT required to PATCH another member&apos;s capabilities.
+              </p>
+            )}
+            <ul className="space-y-1 text-xs">
+              {CLINIC_CAPABILITIES.map((cap) => (
+                <li key={`edit-${cap.value}`} className="flex items-start gap-2">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    disabled={!sessionIsOwner || !profileStId.trim()}
+                    checked={!!editCaps[cap.value as ClinicCapability]}
+                    onChange={(e) =>
+                      setEditCaps((prev) => ({
+                        ...prev,
+                        [cap.value]: e.target.checked,
+                      }))
+                    }
+                  />
+                  <span>{cap.label}</span>
+                </li>
+              ))}
+            </ul>
+            <p className="text-xs font-mono text-zinc-600 dark:text-zinc-400">
+              capabilities: [{editCapabilitiesPayload.join(", ") || "(empty)"}]
+            </p>
+            <button
+              type="button"
+              className="border px-3 py-1 rounded text-xs"
+              disabled={!sessionIsOwner || !profileStId.trim()}
+              onClick={() => void a3bPatchCapabilities()}
+            >
+              A3b PATCH capabilities
+            </button>
+          </div>
+
+          <div className="border-t border-zinc-200 dark:border-zinc-700 pt-2 mt-2 space-y-2">
+            <h4 className="text-xs font-medium">Lane A3c — Post-invite role (PATCH)</h4>
+            <p className="text-xs text-zinc-500">
+              Fix a wrong invite role via PostgREST <code className="text-xs">PATCH staff.role</code> (
+              <code className="text-xs">staff_role_check</code>: owner, doctor, nurse, specialist, staff). Owner or{" "}
+              <code className="text-xs">can_manage_team</code> may change non-owner roles; only{" "}
+              <strong>owner</strong> may assign <code className="text-xs">owner</code>.
+            </p>
+            {!sessionCanManageTeam && (
+              <p className="text-xs text-amber-700 dark:text-amber-400">
+                Need owner JWT or <code className="text-xs">can_manage_team</code> in JWT capabilities.
+              </p>
+            )}
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="text-xs flex items-center gap-2">
+                <span className="text-zinc-600 dark:text-zinc-400">role</span>
+                <select
+                  className="border px-2 py-1 text-xs"
+                  value={editRole}
+                  disabled={!sessionCanManageTeam || !profileStId.trim()}
+                  onChange={(e) => setEditRole(e.target.value)}
+                  aria-label="post-invite staff role"
+                >
+                  {CLINIC_STAFF_ROLES.map((r) => (
+                    <option key={`edit-role-${r}`} value={r} disabled={r === "owner" && !sessionIsOwner}>
+                      {r}
+                      {r === "owner" && !sessionIsOwner ? " (owner JWT only)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="border px-3 py-1 rounded text-xs"
+                disabled={
+                  !profileStId.trim() ||
+                  !canAssignClinicRole(sessionIsOwner, sessionCanManageTeam, normalizeStaffRole(editRole))
+                }
+                onClick={() => void a3cPatchRole()}
+              >
+                A3c PATCH role
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -658,13 +1000,13 @@ export default function StaffRosterPanel({
           onChange={(e) => setWaE164(e.target.value)}
         />
         <p className="text-xs text-zinc-500">
-          INSERT requires <strong>clinic admin</strong> JWT (
+          INSERT requires <strong>owner</strong> or <code className="text-xs">can_manage_team</code> JWT (
           <code className="text-xs">17_organizations_and_staff_channel_links_rls</code>).{" "}
           403 = RLS; 400 =often E.164 <code className="text-xs">staff_channel_links_whatsapp_contact_e164</code>.
         </p>
         <div className="flex flex-wrap gap-2">
           <button type="button" className="border px-3 py-1 rounded text-xs" onClick={() => void b2LinkWa()}>
-            B2 POST staff_channel_links (admin JWT) — then auto A1 + B3
+            B2 POST staff_channel_links (owner / team JWT) — then auto A1 + B3
           </button>
           <button type="button" className="border px-3 py-1 rounded text-xs" onClick={() => void b3Snapshot()}>
             B3 GET transport-runtime-settings

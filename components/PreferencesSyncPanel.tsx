@@ -831,7 +831,7 @@ export default function PreferencesSyncPanel({ bearer, effectiveClId, onLog }: P
       const rpcRes = await clinicPostgrest("POST", "rpc/submit_preference_change", {
         bearer,
         anon,
-        body: JSON.stringify(rpcPayload),
+        body: JSON.stringify({ payload: rpcPayload }),
         prefer: "return=representation",
       });
       onLog(

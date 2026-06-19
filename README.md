@@ -17,7 +17,7 @@ Open [http://localhost:3000](http://localhost:3000). Run prefix **0 → A → B*
 
 ## Documentation
 
-**Harness behavior (panels, env, quirks):** [clinic-onboarding-flow-tester-docs](https://github.com/Amplitud-AI/amplitud-docs/tree/main/clinic-onboarding-flow-tester-docs) in `amplitud-docs`.
+**Harness behavior (panels, env, quirks):** [amplitud-clinics-frontend-tester-docs](https://github.com/Amplitud-AI/amplitud-docs/tree/main/amplitud-clinics-frontend-tester-docs) in `amplitud-docs`.
 
 | Question | Read |
 | --- | --- |

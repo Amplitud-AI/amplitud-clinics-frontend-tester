@@ -26,6 +26,13 @@ type AuthSessionRow = {
   country_code: string | null;
 };
 
+type SessionGeoUpdate = {
+  session_id?: string;
+  city?: string | null;
+  country?: string | null;
+  country_code?: string | null;
+};
+
 function pretty(x: unknown): string {
   try {
     return JSON.stringify(x, null, 2);
@@ -45,10 +52,40 @@ function parseSessionList(data: unknown): AuthSessionRow[] {
   return data.filter(isAuthSessionRow);
 }
 
-function formatCountry(row: AuthSessionRow): string {
+function formatCountryLabel(row: AuthSessionRow): string {
   if (row.country?.trim()) return row.country.trim();
   if (row.country_code?.trim()) return row.country_code.trim();
   return "—";
+}
+
+function formatLocation(row: AuthSessionRow): string {
+  const city = row.city?.trim();
+  const country = formatCountryLabel(row);
+  if (city && country !== "—") return `${city}, ${country}`;
+  if (city) return city;
+  if (country !== "—") return country;
+  return "—";
+}
+
+function rowNeedsGeo(row: AuthSessionRow): boolean {
+  return Boolean(row.ip?.trim()) && formatLocation(row) === "—";
+}
+
+function formatLocationDisplay(row: AuthSessionRow, awaitingGeo: boolean): string {
+  const location = formatLocation(row);
+  if (location !== "—") return location;
+  if (awaitingGeo && row.ip?.trim()) return "Resolving…";
+  return "—";
+}
+
+function mergeGeoUpdate(row: AuthSessionRow, geo: SessionGeoUpdate): AuthSessionRow {
+  if (geo.session_id !== row.id) return row;
+  return {
+    ...row,
+    city: geo.city ?? row.city,
+    country: geo.country ?? row.country,
+    country_code: geo.country_code ?? row.country_code,
+  };
 }
 
 function formatWhen(iso: string | null | undefined): string {
@@ -68,6 +105,7 @@ export default function ActiveSessionsPanel({
   const [revokingId, setRevokingId] = useState<string | null>(null);
   const [revokeToast, setRevokeToast] = useState<string | null>(null);
   const [localDeviceLabel, setLocalDeviceLabel] = useState<string | null>(null);
+  const [awaitingGeo, setAwaitingGeo] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -87,6 +125,7 @@ export default function ActiveSessionsPanel({
     if (!bearer?.trim()) {
       setError("Sign in (Phase 0) to list sessions");
       setRows([]);
+      setAwaitingGeo(false);
       return;
     }
 
@@ -109,6 +148,7 @@ export default function ActiveSessionsPanel({
 
     const parsed = parseSessionList(data);
     setRows(parsed);
+    setAwaitingGeo(parsed.some(rowNeedsGeo));
     onLog("list_my_auth_sessions", pretty(parsed));
   }, [bearer, onLog, supabase]);
 
@@ -119,6 +159,42 @@ export default function ActiveSessionsPanel({
     }, 0);
     return () => window.clearTimeout(id);
   }, [bearer, loadSessions, supabase]);
+
+  useEffect(() => {
+    if (!supabase || !bearer) return;
+
+    const channel = supabase
+      .channel("session-geo-updates")
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "clinic",
+          table: "session_geo",
+        },
+        (payload) => {
+          const geo = payload.new as SessionGeoUpdate;
+          if (!geo.session_id) return;
+          setRows((prev) => {
+            const next = prev.map((row) => mergeGeoUpdate(row, geo));
+            if (!next.some(rowNeedsGeo)) setAwaitingGeo(false);
+            return next;
+          });
+          onLog("session_geo realtime", pretty(geo));
+        },
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [bearer, onLog, supabase]);
+
+  useEffect(() => {
+    if (!awaitingGeo) return;
+    const id = window.setTimeout(() => setAwaitingGeo(false), 30_000);
+    return () => window.clearTimeout(id);
+  }, [awaitingGeo]);
 
   const visibleRows = bearer ? rows : [];
 
@@ -197,7 +273,7 @@ export default function ActiveSessionsPanel({
               <tr className="text-left border-b">
                 <th className="py-1 pr-2">Device</th>
                 <th className="py-1 pr-2">IP</th>
-                <th className="py-1 pr-2">Country</th>
+                <th className="py-1 pr-2">Location</th>
                 <th className="py-1 pr-2">Signed in</th>
                 <th className="py-1 pr-2">Last token refresh</th>
                 <th className="py-1 pr-2"> </th>
@@ -213,7 +289,11 @@ export default function ActiveSessionsPanel({
                       : formatDeviceLabel(row.user_agent)}
                   </td>
                   <td className="py-2 pr-2 align-top font-mono">{row.ip ?? "—"}</td>
-                  <td className="py-2 pr-2 align-top">{formatCountry(row)}</td>
+                  <td className="py-2 pr-2 align-top">
+                    <span className={awaitingGeo && rowNeedsGeo(row) ? "text-zinc-400 italic" : undefined}>
+                      {formatLocationDisplay(row, awaitingGeo)}
+                    </span>
+                  </td>
                   <td className="py-2 pr-2 align-top">{formatWhen(row.created_at)}</td>
                   <td className="py-2 pr-2 align-top">{formatWhen(row.refreshed_at)}</td>
                   <td className="py-2 pr-2 align-top">
@@ -243,8 +323,9 @@ export default function ActiveSessionsPanel({
       )}
 
       <p className="text-xs text-zinc-500">
-        Country is resolved from your sign-in IP and may take a few seconds after login. Location is
-        approximate; VPNs and mobile carriers can show a different country than where you are.
+        Location is resolved by the auth hook via Edge Function after sign-in. This panel listens
+        for updates automatically — no manual refresh needed. Approximate; VPNs and mobile carriers
+        may show a different city or country.
       </p>
       <p className="text-xs text-zinc-500">
         Device labels for <strong>This device</strong> use User-Agent Client Hints when the browser

@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Clinic onboarding flow tester",
-  description: "Local SPA to exercise Supabase OTP + Agnentic clinic APIs",
+  title: "Clinic flow tester — SSR auth build",
+  description: "QA harness with Supabase SSR cookies + middleware (clinics-control parity)",
 };
 
 export default function RootLayout({
@@ -27,7 +27,15 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        <div
+          role="status"
+          className="sticky top-0 z-50 bg-amber-400 text-amber-950 px-4 py-2 text-center text-sm font-semibold border-b border-amber-600 shadow-md"
+        >
+          LIVE BUILD v2: SSR auth parity — /login + middleware + cookies · refreshed Jun 22 2026 ~3:25pm
+        </div>
+        {children}
+      </body>
     </html>
   );
 }

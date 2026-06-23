@@ -1,6 +1,8 @@
 # amplitud-clinics-frontend-tester
 
-Integration QA harness for the clinic onboarding contract pack (**Phase 0–G**). The app is a client-only Next.js SPA that exercises clinic Supabase, agnentic, and optional WhatsApp service HTTP from the browser — for engineers validating [`clinics-frontend-docs`](https://github.com/Amplitud-AI/amplitud-docs/tree/main/clinics-frontend-docs) before features land in production UI.
+Integration QA harness for the clinic onboarding contract pack (**Phase 0–G**). The app exercises clinic Supabase, agnentic, and optional WhatsApp service HTTP from the browser — for engineers validating [`clinics-frontend-docs`](https://github.com/Amplitud-AI/amplitud-docs/tree/main/clinics-frontend-docs) before features land in production UI.
+
+**Auth:** Phase 0 uses production-style Supabase SSR (`@supabase/ssr` cookies + middleware). Sign in at `/login`; protected routes redirect there when the server session is missing (same pattern as `amplitud-ai-clinics-control`).
 
 ## Quick start
 

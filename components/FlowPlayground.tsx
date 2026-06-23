@@ -1,12 +1,14 @@
 "use client";
 
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { LOGIN_PATH, signOutWithScope } from "@/lib/auth/sign-out";
+import { createClient } from "@/lib/supabase/client";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { agnenticFetch, agPath } from "@/lib/agnentic";
 import {
   extractClIdFromJwtPayload,
   decodeJwtPayload,
 } from "@/lib/jwt";
+import ActiveSessionsPanel from "@/components/ActiveSessionsPanel";
 import WhatsAppMcpSessionsPanel from "@/components/WhatsAppMcpSessionsPanel";
 import StaffRosterPanel from "@/components/StaffRosterPanel";
 import ClinicMembershipsPanel from "@/components/ClinicMembershipsPanel";
@@ -45,13 +47,11 @@ export default function FlowPlayground() {
   const anon = getSupabaseAnonKey();
   const agBase = getAgnenticBaseUrl();
 
-  const supabase: SupabaseClient | null = useMemo(() => {
+  const supabase = useMemo(() => {
     if (!supabaseUrl || !anon) return null;
-    return createClient(supabaseUrl, anon);
+    return createClient();
   }, [supabaseUrl, anon]);
 
-  const [email, setEmail] = useState("");
-  const [otp, setOtp] = useState("");
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [userEmailFromSession, setUserEmailFromSession] = useState<string | null>(
     null,
@@ -135,82 +135,29 @@ export default function FlowPlayground() {
     }
   };
 
-  const sendOtp = async () => {
-    if (!supabase) return append("otp", "Configure Supabase URL + anon key");
-    const { error } = await supabase.auth.signInWithOtp({
-      email: email.trim(),
-      options: { shouldCreateUser: true },
-    });
-    append("signInWithOtp", error ? pretty(error) : "Check email for code.");
-  };
-
-  const otpAutoVerifyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-  const otpAutoLastAttemptRef = useRef<string>("");
-
-  const runVerifyOtp = useCallback(
-    async (source: "manual" | "auto") => {
-      if (!supabase) return;
-      if (accessToken) {
-        append(
-          "verifyOtp",
-          "Session already active — one successful verify is enough. Use Sign out for a new OTP, or Refresh JWT if claims changed.",
-        );
-        return;
-      }
-      const token = otp.trim();
-      if (!token) {
-        if (source === "manual") append("verifyOtp", "Enter the email OTP code.");
-        return;
-      }
-      const { data, error } = await supabase.auth.verifyOtp({
-        email: email.trim(),
-        token,
-        type: "email",
-      });
-      append(
-        source === "auto" ? "verifyOtp (auto)" : "verifyOtp",
-        error ? pretty(error) : pretty(data),
-      );
-      if (!error) {
-        setOtp("");
-        otpAutoLastAttemptRef.current = "";
-      } else if (source === "auto") {
-        otpAutoLastAttemptRef.current = "";
-      }
-    },
-    [supabase, accessToken, otp, email, append],
-  );
-
-  const verifyOtp = () => void runVerifyOtp("manual");
-
-  useEffect(() => {
-    if (!supabase || !email.trim() || accessToken) return;
-    const t = otp.trim();
-    if (!/^\d{6}$/.test(t)) {
-      otpAutoLastAttemptRef.current = "";
+  const signOutLocal = async () => {
+    if (!supabase) return;
+    const { error } = await signOutWithScope(supabase, "local");
+    if (error) {
+      append("signOut(local)", error.message);
       return;
     }
-    if (otpAutoLastAttemptRef.current === t) return;
-    if (otpAutoVerifyTimeoutRef.current) clearTimeout(otpAutoVerifyTimeoutRef.current);
-    otpAutoVerifyTimeoutRef.current = setTimeout(() => {
-      otpAutoVerifyTimeoutRef.current = null;
-      otpAutoLastAttemptRef.current = t;
-      void runVerifyOtp("auto");
-    }, 400);
-    return () => {
-      if (otpAutoVerifyTimeoutRef.current) {
-        clearTimeout(otpAutoVerifyTimeoutRef.current);
-        otpAutoVerifyTimeoutRef.current = null;
-      }
-    };
-  }, [otp, email, supabase, accessToken, runVerifyOtp]);
+    append("signOut(local)", "ok — other tabs/sessions stay alive; redirecting to /login");
+    window.location.href = LOGIN_PATH;
+  };
 
-  const signOut = async () => {
+  const signOutGlobal = async () => {
     if (!supabase) return;
-    await supabase.auth.signOut();
-    append("signOut", "ok");
+    const { error } = await signOutWithScope(supabase, "global");
+    if (error) {
+      append("signOut(global)", error.message);
+      return;
+    }
+    append(
+      "signOut(global)",
+      "WARNING: all Supabase sessions for this user are revoked project-wide — redirecting to /login",
+    );
+    window.location.href = LOGIN_PATH;
   };
 
   const runSmokeWithClId = useCallback(
@@ -457,9 +404,13 @@ export default function FlowPlayground() {
   return (
     <div className="max-w-4xl mx-auto p-6 space-y-6 text-sm">
       <header>
-        <h1 className="text-xl font-semibold">Clinic onboarding API flow (dirty tester)</h1>
+        <h1 className="text-xl font-semibold">
+          Clinic onboarding API flow{" "}
+          <span className="text-amber-700 dark:text-amber-400">[SSR auth build v2]</span>
+        </h1>
         <p className="text-zinc-500 mt-1">
-          Flow order: <strong>Phase 0</strong> OTP, <strong>Phase A</strong> operator clinic create,{" "}
+          Flow order: <strong>Phase 0</strong> sign in at <code className="text-xs">/login</code> (SSR cookies),{" "}
+          <strong>Phase A</strong> operator clinic create,{" "}
           <strong>Phase B</strong> smoke, optional Google OAuth, <strong>Phase C</strong> WhatsApp MCP (QR),{" "}
           <strong>Phase D</strong> mint/snapshot/PATCH transport (after MCP; <code className="text-xs">wa_browser_session_id</code>{" "}
           prefilled from session create), <strong>Phase E</strong> staff roster / silent list,{" "}
@@ -502,41 +453,36 @@ export default function FlowPlayground() {
         note="Phase 0 cannot be skipped. The clinic admin signs in with OTP before provisioning and every later admin session."
       >
         <section className="border border-zinc-300 rounded p-4 space-y-3">
-          <h2 className="font-medium">Phase 0 — Supabase email OTP</h2>
+          <h2 className="font-medium">Phase 0 — Supabase session (SSR cookies)</h2>
           {!supabase && <p className="text-red-600">Fix NEXT_PUBLIC_SUPABASE_* in `.env`</p>}
+          <p className="text-xs text-zinc-500">
+            Sign-in uses <code className="text-xs">/login</code> +{" "}
+            <code className="text-xs">@supabase/ssr</code> cookies and middleware — same pattern as clinics control.
+            Middleware sent you here only after a valid session exists.
+          </p>
           <div className="flex flex-wrap gap-2 items-center">
-            <input
-              className="border px-2 py-1 min-w-[240px]"
-              placeholder="staff@example.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-            />
-            <button type="button" className="border px-3 py-1 rounded" onClick={sendOtp}>
-              Send OTP
+            <button
+              type="button"
+              className="border px-3 py-1 rounded"
+              onClick={() => void signOutLocal()}
+            >
+              Log out here
             </button>
-          </div>
-          <div className="flex flex-wrap gap-2 items-center">
-            <input
-              className="border px-2 py-1 w-32"
-              placeholder="code"
-              value={otp}
-              onChange={(e) => setOtp(e.target.value)}
-              inputMode="numeric"
-              autoComplete="one-time-code"
-            />
-            <button type="button" className="border px-3 py-1 rounded" onClick={verifyOtp}>
-              Verify OTP
-            </button>
-            <button type="button" className="border px-3 py-1 rounded" onClick={signOut}>
-              Sign out
+            <button
+              type="button"
+              className="border border-amber-700 px-3 py-1 rounded text-amber-900"
+              onClick={() => void signOutGlobal()}
+            >
+              Log out everywhere
             </button>
             <button type="button" className="border px-3 py-1 rounded text-sm" onClick={() => void refreshClinicJwt()}>
               Refresh JWT
             </button>
           </div>
           <p className="text-xs text-zinc-500">
-            After staff is linked or provisioning changes, use <strong>Refresh JWT</strong> (or sign out / OTP again) so
-            the Custom Access Token Hook re-runs before registry smoke.
+            After staff is linked or provisioning changes, use <strong>Refresh JWT</strong> (or sign out and sign in
+            again at <code className="text-xs">/login</code>) so the Custom Access Token Hook re-runs before registry
+            smoke.
           </p>
           <p>
             Session:{" "}
@@ -547,6 +493,7 @@ export default function FlowPlayground() {
               {pretty(jwtPayload)}
             </pre>
           )}
+          <ActiveSessionsPanel supabase={supabase} bearer={bearer} onLog={append} />
         </section>
       </AnnotationFrame>
 

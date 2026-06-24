@@ -29,3 +29,15 @@ export function extractClIdFromJwtPayload(
   }
   return null;
 }
+
+export function extractStIdFromJwtPayload(
+  payload: Record<string, unknown> | null,
+): string | null {
+  if (!payload) return null;
+  const am = payload.app_metadata;
+  if (typeof am === "object" && am !== null && !Array.isArray(am)) {
+    const st = (am as Record<string, unknown>).st_id;
+    if (typeof st === "string" && st.trim()) return st.trim();
+  }
+  return null;
+}

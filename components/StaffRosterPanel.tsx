@@ -25,7 +25,15 @@ import {
   getSupabaseInviteFunctionName,
   getSupabaseUrl,
 } from "@/lib/config";
-import { decodeJwtPayload } from "@/lib/jwt";
+import { decodeJwtPayload, extractStIdFromJwtPayload } from "@/lib/jwt";
+import {
+  convertImageFileToWebp256,
+  deleteStaffAvatarObject,
+  persistStaffAvatarUrl,
+  readStaffAvatarUrl,
+  staffAvatarObjectPath,
+  uploadStaffAvatarWebp,
+} from "@/lib/staffAvatar";
 
 function pretty(x: unknown): string {
   try {
@@ -53,6 +61,7 @@ type StaffRow = {
   position_title?: string | null;
   date_of_birth?: string | null;
   specialties?: string[] | null;
+  metadata?: Record<string, unknown> | null;
   /** PostgREST embed from ``staff_channel_links`` FK to ``staff`` (see ``11_*``). */
   staff_channel_links?: StaffChannelLinkRow[] | null;
 };
@@ -155,6 +164,7 @@ export default function StaffRosterPanel({
   const [profSpecialties, setProfSpecialties] = useState("");
   const [editCaps, setEditCaps] = useState(emptyInviteCapabilityChecks);
   const [editRole, setEditRole] = useState<string>(DEFAULT_INVITE_ROLE);
+  const [avatarPreviewUrl, setAvatarPreviewUrl] = useState<string | null>(null);
 
   const activeStaff = useMemo(
     () =>
@@ -202,8 +212,17 @@ export default function StaffRosterPanel({
     () => extractCapabilitiesFromJwtPayload(jwtPayload),
     [jwtPayload],
   );
+  const sessionStId = useMemo(
+    () => extractStIdFromJwtPayload(jwtPayload),
+    [jwtPayload],
+  );
   const sessionCanManageTeam = useMemo(
     () => sessionCanManageTeamRoster(sessionIsOwner, sessionJwtCapabilities),
+    [sessionIsOwner, sessionJwtCapabilities],
+  );
+  const sessionCanManageStaffProfiles = useMemo(
+    () =>
+      sessionIsOwner || sessionJwtCapabilities.includes("can_manage_staff_profiles"),
     [sessionIsOwner, sessionJwtCapabilities],
   );
 
@@ -226,7 +245,7 @@ export default function StaffRosterPanel({
       return;
     }
     const q =
-      "select=st_id,display_name,email,role,capabilities,status,first_name,last_name,position_title,date_of_birth,specialties," +
+      "select=st_id,display_name,email,role,capabilities,status,first_name,last_name,position_title,date_of_birth,specialties,metadata," +
       "staff_channel_links(channel,contact_value,verification_status)" +
       "&order=created_at.desc&limit=50" +
       (cid ? `&cl_id=eq.${encodeURIComponent(cid)}` : "");
@@ -419,6 +438,7 @@ export default function StaffRosterPanel({
     );
     setEditCaps(capabilityChecksFromArray(row.capabilities));
     setEditRole(normalizeStaffRole(row.role));
+    setAvatarPreviewUrl(readStaffAvatarUrl(row.metadata ?? null));
   }, [roster]);
 
   const a3cPatchRole = useCallback(async () => {
@@ -586,6 +606,107 @@ export default function StaffRosterPanel({
     profileStId,
     token,
   ]);
+
+  const avatarTargetStId = profileStId.trim();
+  const avatarIsSelf = Boolean(sessionStId && avatarTargetStId && sessionStId === avatarTargetStId);
+  const avatarCanWrite = Boolean(
+    avatarTargetStId &&
+      cid &&
+      (avatarIsSelf || sessionCanManageStaffProfiles),
+  );
+
+  const a4UploadAvatar = useCallback(
+    async (file: File | null) => {
+      if (!supabase) {
+        onLog("Lane A4", "No Supabase client — sign in via Phase 0.");
+        return;
+      }
+      if (!canPostgrestTenant) {
+        onLog("Lane A4", "Need session + tenant cl_id in UI (must match JWT app_metadata.cl_id).");
+        return;
+      }
+      if (!avatarTargetStId) {
+        onLog("Lane A4", "Pick a staff row in A3 first.");
+        return;
+      }
+      if (!avatarCanWrite) {
+        onLog(
+          "Lane A4",
+          `Need JWT st_id=${avatarTargetStId} (self) or owner / can_manage_staff_profiles for cross-user upload.`,
+        );
+        return;
+      }
+      if (!file) {
+        onLog("Lane A4", "Choose an image file.");
+        return;
+      }
+      try {
+        const webp = await convertImageFileToWebp256(file);
+        const path = staffAvatarObjectPath(cid, avatarTargetStId);
+        onLog("Lane A4 upload", `bucket=staff-avatars path=${path} bytes=${webp.size}`);
+        const publicUrl = await uploadStaffAvatarWebp(supabase, cid, avatarTargetStId, webp);
+        const rpc = await persistStaffAvatarUrl(supabase, {
+          stId: avatarTargetStId,
+          avatarUrl: publicUrl,
+          asAdmin: !avatarIsSelf,
+        });
+        onLog("Lane A4 RPC avatar_url", pretty(rpc));
+        setAvatarPreviewUrl(publicUrl);
+        await a1List();
+      } catch (err) {
+        onLog("Lane A4 error", err instanceof Error ? err.message : String(err));
+      }
+    },
+    [
+      a1List,
+      avatarCanWrite,
+      avatarIsSelf,
+      avatarTargetStId,
+      canPostgrestTenant,
+      cid,
+      onLog,
+      supabase,
+    ],
+  );
+
+  const a4DeleteAvatar = useCallback(async () => {
+    if (!supabase) {
+      onLog("Lane A4", "No Supabase client — sign in via Phase 0.");
+      return;
+    }
+    if (!canPostgrestTenant || !avatarTargetStId || !avatarCanWrite) {
+      onLog("Lane A4", "Need tenant cl_id, picked st_id, and self or profile-admin JWT.");
+      return;
+    }
+    try {
+      await deleteStaffAvatarObject(supabase, cid, avatarTargetStId);
+      const rpc = await persistStaffAvatarUrl(supabase, {
+        stId: avatarTargetStId,
+        avatarUrl: null,
+        asAdmin: !avatarIsSelf,
+      });
+      onLog("Lane A4 delete avatar", pretty(rpc));
+      setAvatarPreviewUrl(null);
+      await a1List();
+    } catch (err) {
+      onLog("Lane A4 delete error", err instanceof Error ? err.message : String(err));
+    }
+  }, [
+    a1List,
+    avatarCanWrite,
+    avatarIsSelf,
+    avatarTargetStId,
+    canPostgrestTenant,
+    cid,
+    onLog,
+    supabase,
+  ]);
+
+  useEffect(() => {
+    if (!sessionStId || profileStId.trim()) return;
+    setProfileStId(sessionStId);
+    hydrateProfileFromRoster(sessionStId);
+  }, [hydrateProfileFromRoster, profileStId, sessionStId]);
 
   const c2SaveSilent = useCallback(async () => {
     if (!token) {
@@ -862,6 +983,62 @@ export default function StaffRosterPanel({
           <button type="button" className="border px-3 py-1 rounded text-xs" onClick={() => void a3PatchProfile()}>
             A3 PATCH staff profile
           </button>
+
+          <div className="border-t border-zinc-200 dark:border-zinc-700 pt-2 mt-2 space-y-2">
+            <h4 className="text-xs font-medium">Lane A4 — Staff avatar (Storage + metadata.avatar_url)</h4>
+            <p className="text-xs text-zinc-500">
+              Bucket <code className="text-xs">staff-avatars</code>, path{" "}
+              <code className="text-xs">{`{cl_id}/{st_id}/avatar.webp`}</code>. Canonical URL on{" "}
+              <code className="text-xs">clinic.staff.metadata.avatar_url</code>. Uses JWT{" "}
+              <code className="text-xs">app_metadata.st_id</code> for self-upload; owner /{" "}
+              <code className="text-xs">can_manage_staff_profiles</code> for another row.
+            </p>
+            <p className="text-xs font-mono text-zinc-600 dark:text-zinc-400">
+              session st_id: {sessionStId ?? "(missing — refresh JWT)"} · picked: {avatarTargetStId || "—"} · cl_id:{" "}
+              {cid || "—"}
+            </p>
+            <div className="flex flex-wrap items-center gap-3">
+              {avatarPreviewUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={avatarPreviewUrl}
+                  alt="staff avatar preview"
+                  className="h-16 w-16 rounded-full object-cover border border-zinc-300 dark:border-zinc-600"
+                />
+              ) : (
+                <div className="h-16 w-16 rounded-full border border-dashed border-zinc-400 text-[10px] flex items-center justify-center text-zinc-500">
+                  no avatar
+                </div>
+              )}
+              <label className="text-xs flex flex-col gap-1">
+                <span>image file</span>
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  className="text-xs"
+                  disabled={!avatarCanWrite}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0] ?? null;
+                    void a4UploadAvatar(f);
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+              <button
+                type="button"
+                className="border px-3 py-1 rounded text-xs"
+                disabled={!avatarCanWrite || !avatarPreviewUrl}
+                onClick={() => void a4DeleteAvatar()}
+              >
+                A4 delete avatar
+              </button>
+            </div>
+            {!sessionStId && (
+              <p className="text-xs text-amber-700 dark:text-amber-400">
+                JWT missing <code className="text-xs">app_metadata.st_id</code> — refresh session after auth hook deploy.
+              </p>
+            )}
+          </div>
 
           <div className="border-t border-zinc-200 dark:border-zinc-700 pt-2 mt-2 space-y-2">
             <h4 className="text-xs font-medium">Lane A3b — Post-invite capabilities (PATCH)</h4>
